@@ -9,7 +9,7 @@ readme = "README.md"
 description = """
 Android host driver for USB serial adapters, currently works with CDC-ACM devices.
 """
-keywords = ["usb", "serial", "serialport", "uart", "vcp", "android", "hardware"]
+keywords = ["usb", "serial", "serialport", "uart", "android"]
 categories = ["api-bindings", "hardware-support"]
 
 [package.metadata.android.sdk]
