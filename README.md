@@ -4,7 +4,7 @@ Android host driver for USB serial adapters, currently works with CDC-ACM device
 
 Currently it is far from being feature-complete, and bug reports will be helpful.
 
-Documentation: <https://docs.rs/android-usbser/latest>.
+Documentation: <https://docs.rs/android_usbser/latest>.
 
 ## TODO
 - Use `android.hardware.usb.UsbRequest` to avoid deep copying and provide asynchronous features (crate `btleplug` can be checked for reference).
