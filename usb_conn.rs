@@ -688,9 +688,8 @@ pub unsafe fn create_rusb_context() -> Result<rusb::Context, rusb::Error> {
     use rusb::ffi::*;
     // creates a null pointer of type `libusb_context`
     let mut context = std::mem::MaybeUninit::<*mut libusb_context>::uninit();
-    // according to `libusb` docs, `libusb_set_option` doesn't use the context
     check_libusb_error(libusb_set_option(
-        *context.as_ptr(),
+        std::ptr::null_mut(),
         constants::LIBUSB_OPTION_NO_DEVICE_DISCOVERY,
     ))?;
     // allocates the libusb context object by `libusb_init()`, sets the pointer `context`
