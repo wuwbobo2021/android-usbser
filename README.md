@@ -6,11 +6,7 @@ Currently it is far from being feature-complete, and bug reports will be helpful
 
 Documentation: <https://docs.rs/android_usbser/latest>.
 
-## TODO
-- Use `android.hardware.usb.UsbRequest` to avoid deep copying and provide asynchronous features (crate `btleplug` can be checked for reference).
-- Currently, the `usb` module handles everything with JNI calls. `libusb` and its wrapper `rusb` have limited functionalities on unrooted Android, without being able to check for connected devices before opening one of them. Even in `android-usbser-rs`, `create_rusb_connection()` needs debugging.
-- Make the `usb` module merge into the `nusb` crate.
-- Implement drivers for other serial adapters, for example, those with FTDI or Prolific chips.
+TODO: Implement drivers for other serial adapters, for example, those with FTDI, Prolific, or CH34x chips.
 
 ## Testing
 
@@ -31,13 +27,13 @@ publish = false
 log = "0.4"
 android_logger = "0.14"
 android-activity = { version = "0.6", features = ["native-activity"] }
-android-usbser = { version = "0.1", features = ["serialport"] }
+android-usbser = "0.2"
 serialport = "4.6"
 
 [lib]
 name = "android_usb_cdc_test"
 crate-type = ["cdylib"]
-path = "lib.rs"
+path = "main.rs"
 
 [package.metadata.android]
 package = "com.example.android_usb_cdc_test"
@@ -62,7 +58,7 @@ name = "android.hardware.usb.action.USB_DEVICE_ATTACHED"
 resource = "@xml/device_filter"
 ```
 
-`lib.rs`:
+`main.rs`:
 
 ```rust
 // This is merely a simplest test program for the library crate.
@@ -290,35 +286,22 @@ fn serial_conn_loop(serial: CdcSerial) {
 
 // `set_config()` is available in `CdcSerial`, but this is testing `SerialPort` trait impl.
 fn config_serialport(serial: &mut dyn SerialPort, conf: &SerialConfig) -> Result<(), String> {
-    let parity = conf
-        .parity
-        .try_into()
-        .map_err(|_| "Parity mode unsupported in `serialport`: {parity}.")?;
-    let data_bits = conf
-        .data_bits
-        .try_into()
-        .map_err(|_| "Data bits unsupported in `serialport`: {data_bits}.")?;
-    let stop_bits = conf
-        .stop_bits
-        .try_into()
-        .map_err(|_| "Stop bits unsupported in `serialport`: {stop_bits}.")?;
-
     serial
         .set_baud_rate(conf.baud_rate)
         .map_err(|e| format!("Error: failed to set baudrate: {e}."))?;
     serial
-        .set_parity(parity)
+        .set_parity(conf.parity)
         .map_err(|e| format!("Error: failed to set parity: {e}."))?;
     serial
-        .set_data_bits(data_bits)
+        .set_data_bits(conf.data_bits)
         .map_err(|e| format!("Error: failed to set data bits: {e}."))?;
     serial
-        .set_stop_bits(stop_bits)
+        .set_stop_bits(conf.stop_bits)
         .map_err(|e| format!("Error: failed to set stop bits: {e}."))?;
 
     info!(
-        "SerialPort parameters set: {0} {parity} {data_bits} {stop_bits}",
-        conf.baud_rate
+        "SerialPort parameters set: {} {} {} {}",
+        conf.baud_rate, conf.parity, conf.data_bits, conf.stop_bits
     );
     Ok(())
 }
