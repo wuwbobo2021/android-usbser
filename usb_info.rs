@@ -1,26 +1,24 @@
-use crate::usb::{android_api_level, jerr, jni_call_ret_obj, usb_manager, with_jni_env_ctx, Error};
+use crate::usb::{jerr, usb_manager, Error};
 use getset::*;
-use jni::{
-    objects::{JObject, JString},
-    sys::jint,
-    JNIEnv,
-};
+use jni::{objects::JObject, sys::jint, JNIEnv};
+use jni_min_helper::*;
 
 /// Enumerates for all USB devices via Android Java API.
 pub fn list_devices() -> Result<Vec<DeviceInfo>, Error> {
     let usb_man = usb_manager()?;
-    with_jni_env_ctx(|env, _| {
-        let mut devices = Vec::new();
-        let ref_dev_list =
-            jni_call_ret_obj(env, &usb_man, "getDeviceList", "()Ljava/util/HashMap;", &[])?;
-        let map_dev = env.get_map(&ref_dev_list).map_err(jerr)?;
-        let mut iter_dev = map_dev.iter(env).map_err(jerr)?;
-        while let Some((name, dev)) = iter_dev.next(env).map_err(jerr)? {
-            devices.push(DeviceInfo::build(env, &dev)?);
-            drop((env.auto_local(name), env.auto_local(dev)));
-        }
-        Ok(devices)
-    })
+    let env = &mut jni_attach_vm().map_err(jerr)?;
+    let mut devices = Vec::new();
+    let ref_dev_list = env
+        .call_method(&usb_man, "getDeviceList", "()Ljava/util/HashMap;", &[])
+        .get_object(env)
+        .map_err(jerr)?;
+    let map_dev = env.get_map(&ref_dev_list).map_err(jerr)?;
+    let mut iter_dev = map_dev.iter(env).map_err(jerr)?;
+    while let Some((name, dev)) = iter_dev.next(env).map_err(jerr)? {
+        devices.push(DeviceInfo::build(env, &dev)?);
+        drop((env.auto_local(name), env.auto_local(dev)));
+    }
+    Ok(devices)
 }
 
 /// Corresponds to `android.hardware.usb.UsbDevice`.
@@ -70,13 +68,16 @@ impl DeviceInfo {
         let num_interfaces = get_int_field(env, dev, "getInterfaceCount")? as u8;
         let mut interface_refs = Vec::new();
         for i in 0..num_interfaces {
-            interface_refs.push(jni_call_ret_obj(
-                env,
-                dev,
-                "getInterface",
-                "(I)Landroid/hardware/usb/UsbInterface;",
-                &[(i as jint).into()],
-            )?);
+            interface_refs.push(
+                env.call_method(
+                    dev,
+                    "getInterface",
+                    "(I)Landroid/hardware/usb/UsbInterface;",
+                    &[(i as jint).into()],
+                )
+                .get_object(env)
+                .map_err(jerr)?,
+            );
         }
         let mut info = Self {
             internal: env.new_global_ref(dev).map_err(jerr)?,
@@ -184,23 +185,17 @@ impl std::fmt::Debug for InterfaceInfo {
     }
 }
 
-// These functions call java functions without parameter. Error::Other on failure.
+// These functions call java methods without parameter. Error::Other on failure.
 #[inline(always)]
 fn get_int_field(env: &mut JNIEnv, dev: &JObject<'_>, method: &str) -> Result<jint, Error> {
     env.call_method(dev, method, "()I", &[])
-        .and_then(|v| v.i())
+        .get_int()
         .map_err(jerr)
 }
 #[inline(always)]
 fn get_string_field(env: &mut JNIEnv, dev: &JObject<'_>, method: &str) -> Result<String, Error> {
-    let res = env
-        .call_method(dev, method, "()Ljava/lang/String;", &[])
-        .and_then(|o| o.l())
-        .map_err(jerr)?;
-    let jstring = JString::from(res);
-    // Safety: `jstring` is a reference of `java.lang.String`.
-    let jstr = unsafe { env.get_string_unchecked(&jstring) }.map_err(jerr)?;
-    let result = jstr.into();
-    drop(env.auto_local(jstring));
-    Ok(result)
+    env.call_method(dev, method, "()Ljava/lang/String;", &[])
+        .get_object(env)
+        .and_then(|o| o.get_string(env))
+        .map_err(jerr)
 }

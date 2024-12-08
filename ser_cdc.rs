@@ -1,10 +1,10 @@
 use std::{
     io::{self, Error, ErrorKind, Read, Write},
-    str::FromStr,
     time::Duration,
 };
 
 use crate::usb::{self, DeviceInfo, InterfaceInfo, SyncReader, SyncWriter};
+use crate::SerialConfig;
 use nusb::transfer::{Control, ControlType, Direction, Recipient};
 
 use serialport::{DataBits, Parity, SerialPort, StopBits};
@@ -20,10 +20,6 @@ const SEND_BREAK: u8 = 0x23;
 /// This is currently a thin wrapper of USB operations, it requires hardware buffers
 /// at the device side. It uses the CDC ACM Data Interface Class to transfer data
 /// (the Communication Interface Class is used for probing and serial configuration).
-///
-/// `serialport::SerialPort` implementation can be enabled by an optional feature.
-///
-/// Inspired by <https://github.com/mik3y/usb-serial-for-android>, `CdcAcmSerialDriver.java`.
 ///
 /// Reference: *USB Class Definitions for Communication Devices, Version 1.1*,
 /// especially section 3.6.2.1, 5.2.3.2 and 6.2(.13).
@@ -181,107 +177,6 @@ impl Write for CdcSerial {
     /// Does nothing.
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
-    }
-}
-
-/// Sets baudrate, parity check mode, data bits and stop bits.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct SerialConfig {
-    pub baud_rate: u32,
-    pub parity: Parity,
-    pub data_bits: DataBits,
-    pub stop_bits: StopBits,
-}
-
-impl Default for SerialConfig {
-    fn default() -> Self {
-        Self {
-            baud_rate: 9600,
-            parity: Parity::None,
-            data_bits: DataBits::Eight,
-            stop_bits: StopBits::One,
-        }
-    }
-}
-
-impl FromStr for SerialConfig {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bad_par = ErrorKind::InvalidInput;
-        let mut strs = s.split(',');
-
-        let str_baud = strs.next().ok_or(Error::new(bad_par, s))?;
-        let baud_rate = str_baud
-            .trim()
-            .parse()
-            .map_err(|_| Error::new(bad_par, s))?;
-
-        let str_parity = strs.next().ok_or(Error::new(bad_par, s))?;
-        let parity = match str_parity
-            .trim()
-            .chars()
-            .next()
-            .ok_or(Error::new(bad_par, s))?
-        {
-            'N' => Parity::None,
-            'O' => Parity::Odd,
-            'E' => Parity::Even,
-            _ => return Err(Error::new(bad_par, s)),
-        };
-
-        let str_data_bits = strs.next().ok_or(Error::new(bad_par, s))?;
-        let data_bits = str_data_bits
-            .trim()
-            .parse()
-            .map_err(|_| Error::new(bad_par, s))?;
-        let data_bits = match data_bits {
-            5 => DataBits::Five,
-            6 => DataBits::Six,
-            7 => DataBits::Seven,
-            8 => DataBits::Eight,
-            _ => return Err(Error::new(bad_par, s)),
-        };
-
-        let str_stop_bits = strs.next().ok_or(Error::new(bad_par, s))?;
-        let stop_bits = str_stop_bits
-            .trim()
-            .parse()
-            .map_err(|_| Error::new(bad_par, s))?;
-        let stop_bits = match stop_bits {
-            1. => StopBits::One,
-            2. => StopBits::Two,
-            _ => return Err(Error::new(bad_par, s)),
-        };
-
-        Ok(Self {
-            baud_rate,
-            parity,
-            data_bits,
-            stop_bits,
-        })
-    }
-}
-
-impl std::fmt::Display for SerialConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let baud_rate = self.baud_rate;
-        let parity = match self.parity {
-            Parity::None => 'N',
-            Parity::Odd => 'O',
-            Parity::Even => 'E',
-        };
-        let data_bits = match self.data_bits {
-            DataBits::Five => "5",
-            DataBits::Six => "6",
-            DataBits::Seven => "7",
-            DataBits::Eight => "8",
-        };
-        let stop_bits = match self.stop_bits {
-            StopBits::One => "1",
-            StopBits::Two => "2",
-        };
-        write!(f, "{baud_rate},{parity},{data_bits},{stop_bits}")
     }
 }
 

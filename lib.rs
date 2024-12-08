@@ -1,13 +1,14 @@
 //! Android USB serial driver, currently works with CDC-ACM devices.
 //!
+//! Inspired by <https://github.com/mik3y/usb-serial-for-android>.
+//!
 //! It is far from being feature-complete. Of course you can make use of something like
 //! [react-native-usb-serialport](https://www.npmjs.com/package/react-native-usb-serialport),
 //! however, that may introduce multiple layers between Rust and the Linux kernel.
 //!
-//! This crate requires `ndk_context::AndroidContext`, usually initialized by
-//! crate `android_activity`. `jni::JavaVM::attach_current_thread_permanently()` is called.
+//! This crate uses `ndk_context::AndroidContext`, usually initialized by `android_activity`.
 //!
-//! The older version of this crate performs USB transfers through JNI calls but not `nusb`,
+//! The initial version of this crate performs USB transfers through JNI calls but not `nusb`,
 //! do not use it except you have encountered compatibility problems.
 
 mod ser_cdc;
@@ -19,7 +20,7 @@ pub use ser_cdc::*;
 /// Equals `std::io::Error`.
 pub type Error = std::io::Error;
 
-/// Android helper for `nusb`. It needs enhancements before merging into that crate.
+/// Android helper for `nusb`. It may be merged into that crate in the future.
 ///
 /// Reference:
 /// - <https://developer.android.com/develop/connectivity/usb/host>
@@ -30,74 +31,128 @@ pub mod usb {
     pub use crate::usb_sync::*;
     pub use crate::Error;
 
-    /// Different threads must use different `JNIEnv` while sharing the same JVM.
-    /// `jni::JavaVM::attach_current_thread()` allows nested (multiple) calls.
-    /// Note: it assumes the current context is initialized by `android-activity`,
-    /// then `with_jni_env_ctx()` calls throughout the code actually uses handlers
-    /// of the same Android context (the handler `AndroidContext` is `Copy`).
+    /// Maps unexpected JNI errors to `std::io::Error` of `ErrorKind::Other`
+    /// (`From<jni::errors::Error>` cannot be implemented for `std::io::Error`
+    /// here because of the orphan rule). Side effect: `jni_last_cleared_ex()`.
     #[inline(always)]
-    pub(crate) fn with_jni_env_ctx<R>(
-        f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JObject<'static>) -> Result<R, Error>,
-    ) -> Result<R, Error> {
-        let ctx = ndk_context::android_context();
-        // Safety: as documented in `ndk-context` to obtain the `jni::JavaVM``
-        let jvm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }
-            .map_err(|_| Error::other("Failed to get `jni::JavaVM`"))?;
-        // Safety: as documented in `cargo-apk` example to obtain the context's JNI reference
-        let context = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
-        let mut env = jvm
-            .attach_current_thread()
-            .map_err(|_| Error::other("Failed to attach the current thread with JVM"))?;
-        f(&mut env, &context)
-    }
-
-    // `JObject` (got from `call_method()`) causes local reference overflow, wrap it with `AutoLocal`.
-    #[inline(always)]
-    pub(crate) fn jni_call_ret_obj<'local, 'other_local, O>(
-        env: &mut jni::JNIEnv<'local>,
-        obj: O,
-        name: &str,
-        sig: &str,
-        args: &[jni::objects::JValueGen<&jni::objects::JObject<'other_local>>],
-    ) -> Result<jni::objects::AutoLocal<'local, jni::objects::JObject<'local>>, Error>
-    where
-        O: AsRef<jni::objects::JObject<'other_local>>,
-    {
-        env.call_method(obj, name, sig, args)
-            .and_then(|o| o.l())
-            .map(|o| env.auto_local(o))
-            .map_err(jerr)
-    }
-
-    /// Error converter, necessary for handling Java exceptions.
-    #[inline]
-    pub(crate) fn jerr(e: jni::errors::Error) -> Error {
-        if let jni::errors::Error::JavaException = e {
-            let _ = with_jni_env_ctx(|env, _| {
-                let _ = env.exception_describe();
-                if env.exception_occurred().is_ok() {
-                    env.exception_clear().unwrap(); // panic if unable to clear
-                }
-                Ok(())
-            });
+    pub(crate) fn jerr(err: jni_min_helper::jni::errors::Error) -> Error {
+        use jni::errors::Error::*;
+        use jni_min_helper::*;
+        if let JavaException = err {
+            let err = jni_clear_ex(err);
+            jni_last_cleared_ex()
+                .ok_or(JavaException)
+                .and_then(|ex| Ok((ex, jni_attach_vm()?)))
+                .and_then(|(ex, ref mut env)| {
+                    Ok((ex.get_class_name(env)?, ex.get_throwable_msg(env)?))
+                })
+                .map(|(cls, msg)| Error::other(format!("{cls}: {msg}")))
+                .unwrap_or(Error::other(err))
+        } else {
+            Error::other(err)
         }
-        Error::other(e)
     }
+}
 
-    #[inline]
-    pub(crate) fn android_api_level() -> i32 {
-        use std::sync::OnceLock;
-        static API_LEVEL: OnceLock<i32> = OnceLock::new();
-        *API_LEVEL.get_or_init(|| {
-            with_jni_env_ctx(|env, _| {
-                // the version can be read from `android_activity` or `ndk_sys`,
-                // but here it tries to avoid such dependency or making unsafe calls.
-                let os_build_class = env.find_class("android/os/Build$VERSION").map_err(jerr)?;
-                env.get_static_field(os_build_class, "SDK_INT", "I")
-                    .and_then(|v| v.i())
-                    .map_err(jerr)
-            })
-            .unwrap_or(1)
+use serialport::{DataBits, Parity, StopBits};
+
+/// Sets baudrate, parity check mode, data bits and stop bits.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct SerialConfig {
+    pub baud_rate: u32,
+    pub parity: Parity,
+    pub data_bits: DataBits,
+    pub stop_bits: StopBits,
+}
+
+impl Default for SerialConfig {
+    fn default() -> Self {
+        Self {
+            baud_rate: 9600,
+            parity: Parity::None,
+            data_bits: DataBits::Eight,
+            stop_bits: StopBits::One,
+        }
+    }
+}
+
+impl std::str::FromStr for SerialConfig {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bad_par = std::io::ErrorKind::InvalidInput;
+        let mut strs = s.split(',');
+
+        let str_baud = strs.next().ok_or(Error::new(bad_par, s))?;
+        let baud_rate = str_baud
+            .trim()
+            .parse()
+            .map_err(|_| Error::new(bad_par, s))?;
+
+        let str_parity = strs.next().ok_or(Error::new(bad_par, s))?;
+        let parity = match str_parity
+            .trim()
+            .chars()
+            .next()
+            .ok_or(Error::new(bad_par, s))?
+        {
+            'N' => Parity::None,
+            'O' => Parity::Odd,
+            'E' => Parity::Even,
+            _ => return Err(Error::new(bad_par, s)),
+        };
+
+        let str_data_bits = strs.next().ok_or(Error::new(bad_par, s))?;
+        let data_bits = str_data_bits
+            .trim()
+            .parse()
+            .map_err(|_| Error::new(bad_par, s))?;
+        let data_bits = match data_bits {
+            5 => DataBits::Five,
+            6 => DataBits::Six,
+            7 => DataBits::Seven,
+            8 => DataBits::Eight,
+            _ => return Err(Error::new(bad_par, s)),
+        };
+
+        let str_stop_bits = strs.next().ok_or(Error::new(bad_par, s))?;
+        let stop_bits = str_stop_bits
+            .trim()
+            .parse()
+            .map_err(|_| Error::new(bad_par, s))?;
+        let stop_bits = match stop_bits {
+            1. => StopBits::One,
+            2. => StopBits::Two,
+            _ => return Err(Error::new(bad_par, s)),
+        };
+
+        Ok(Self {
+            baud_rate,
+            parity,
+            data_bits,
+            stop_bits,
         })
+    }
+}
+
+impl std::fmt::Display for SerialConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let baud_rate = self.baud_rate;
+        let parity = match self.parity {
+            Parity::None => 'N',
+            Parity::Odd => 'O',
+            Parity::Even => 'E',
+        };
+        let data_bits = match self.data_bits {
+            DataBits::Five => "5",
+            DataBits::Six => "6",
+            DataBits::Seven => "7",
+            DataBits::Eight => "8",
+        };
+        let stop_bits = match self.stop_bits {
+            StopBits::One => "1",
+            StopBits::Two => "2",
+        };
+        write!(f, "{baud_rate},{parity},{data_bits},{stop_bits}")
     }
 }

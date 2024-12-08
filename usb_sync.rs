@@ -1,12 +1,14 @@
 // Related issue: <https://github.com/kevinmehall/nusb/issues/4>.
 
 use crate::Error;
-use std::io::ErrorKind;
-use std::time::Duration;
+use jni_min_helper::block_for_timeout;
 
-type ReadQueue = nusb::transfer::Queue<nusb::transfer::RequestBuffer>;
-type WriteQueue = nusb::transfer::Queue<Vec<u8>>;
-use futures_lite::FutureExt;
+use futures_lite::future::block_on;
+use std::{io::ErrorKind, time::Duration};
+
+use nusb::transfer::{Queue, RequestBuffer, TransferError};
+type ReadQueue = Queue<RequestBuffer>;
+type WriteQueue = Queue<Vec<u8>>;
 
 /// Synchronous wrapper of a `nusb` IN transfer queue.
 pub struct SyncReader {
@@ -32,27 +34,21 @@ impl SyncReader {
 
         self.queue.submit(req);
         let fut = self.queue.next_complete();
-        let fut_comp = async { Some(fut.await) };
-        let fut_cancel = async {
-            async_io::Timer::after(timeout).await;
-            None
-        };
         let comp = {
-            let mut maybe_comp = async_io::block_on(fut_comp.or(fut_cancel));
+            let mut maybe_comp = block_for_timeout(fut, timeout);
             if maybe_comp.is_none() {
                 self.queue.cancel_all(); // the only one
                 if self.queue.pending() == 0 {
                     self.buf.replace(Vec::new());
                     return Err(Error::other("Unable to get the transfer result"));
                 }
-                let comp = async_io::block_on(self.queue.next_complete());
+                let comp = block_on(self.queue.next_complete());
                 maybe_comp.replace(comp);
             }
             maybe_comp.unwrap()
         };
         let len_reveived = comp.data.len();
 
-        use nusb::transfer::TransferError;
         let result = match comp.status {
             Ok(()) => {
                 buf[..len_reveived].copy_from_slice(&comp.data);
@@ -104,27 +100,21 @@ impl SyncWriter {
 
         self.queue.submit(buf_async);
         let fut = self.queue.next_complete();
-        let fut_comp = async { Some(fut.await) };
-        let fut_cancel = async {
-            async_io::Timer::after(timeout).await;
-            None
-        };
         let comp = {
-            let mut maybe_comp = async_io::block_on(fut_comp.or(fut_cancel));
+            let mut maybe_comp = block_for_timeout(fut, timeout);
             if maybe_comp.is_none() {
                 self.queue.cancel_all(); // the only one
                 if self.queue.pending() == 0 {
                     self.buf.replace(Vec::new());
                     return Err(Error::other("Unable to get the transfer result"));
                 }
-                let comp = async_io::block_on(self.queue.next_complete());
+                let comp = block_on(self.queue.next_complete());
                 maybe_comp.replace(comp);
             }
             maybe_comp.unwrap()
         };
         let len_sent = comp.data.actual_length();
 
-        use nusb::transfer::TransferError;
         let result = match comp.status {
             Ok(()) => Ok(len_sent),
             Err(TransferError::Cancelled) => {

@@ -12,9 +12,7 @@ TODO: Implement drivers for other serial adapters, for example, those with FTDI,
 
 Make sure the JDK, Android SDK and NDK is installed and configured, and the Rust target `aarch64-linux-android` is installed. Install `cargo-apk` and make sure the release keystore is configured.
 
-Create a folder named `android-usb-cdc-test`, and create these files inside it:
-
-`Cargo.toml`:
+Create a folder named `android-usb-cdc-test`, and create `Cargo.toml` inside it:
 
 ```toml
 [package]
@@ -27,13 +25,13 @@ publish = false
 log = "0.4"
 android_logger = "0.14"
 android-activity = { version = "0.6", features = ["native-activity"] }
-android-usbser = "0.2"
+android-usbser = "0.2.1"
 serialport = "4.6"
 
 [lib]
 name = "android_usb_cdc_test"
 crate-type = ["cdylib"]
-path = "main.rs"
+path = "lib.rs"
 
 [package.metadata.android]
 package = "com.example.android_usb_cdc_test"
@@ -58,7 +56,248 @@ name = "android.hardware.usb.action.USB_DEVICE_ATTACHED"
 resource = "@xml/device_filter"
 ```
 
-`main.rs`:
+### USB connection test (polling in the main thread)
+
+`lib.rs`:
+
+```rust
+use android_activity::{AndroidApp, MainEvent, PollEvent};
+use android_usbser::usb;
+use log::{info, warn};
+use std::time::Duration;
+
+#[no_mangle]
+fn android_main(app: AndroidApp) {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("android_usb_cdc_test"),
+    );
+
+    let mut startup_dev = usb::check_attached_intent().ok();
+    let mut watcher = usb::watch_devices().unwrap();
+    let mut perm_req: Option<usb::PermissionRequest> = None;
+    let mut on_destroy = false;
+    loop {
+        app.poll_events(
+            Some(Duration::from_secs(1)), // timeout
+            |event| match event {
+                PollEvent::Main(MainEvent::Start) => {
+                    info!("Main Start.");
+                }
+                PollEvent::Main(MainEvent::Resume { loader: _, .. }) => {
+                    info!("Main Resume.");
+                }
+                PollEvent::Main(MainEvent::Pause) => {
+                    info!("Main Pause.");
+                }
+                PollEvent::Main(MainEvent::Stop) => {
+                    info!("Main Stop.");
+                }
+                PollEvent::Main(MainEvent::Destroy) => {
+                    info!("Main Destroy.");
+                    on_destroy = true;
+                }
+                _ => (),
+            },
+        );
+        if on_destroy {
+            return;
+        }
+        let dev_info = if let Some(dev) = startup_dev.take() {
+            info!("Got device from startup intent.");
+            if !dev.has_permission().unwrap() {
+                warn!("Unexpected: no permission.");
+                continue;
+            }
+            dev
+        } else if let Some(req) = perm_req.as_ref() {
+            if !req.responsed() {
+                continue;
+            }
+            let req = perm_req.take().unwrap();
+            let dev = req.device_info().clone();
+            // `responsed()` returned true, so unwrap here.
+            if !req.take_response().unwrap() {
+                // boolean response
+                info!("Permission denied.");
+                continue;
+            }
+            dev
+        } else {
+            match watcher.take_next() {
+                None => continue,
+                Some(usb::HotplugEvent::Connected(dev)) => {
+                    info!("Device connected ({}).", dev.path_name());
+                    if dev.has_permission().unwrap() {
+                        dev
+                    } else {
+                        perm_req = dev.request_permission().unwrap_or(None);
+                        if perm_req.is_some() {
+                            info!("Performing permission request...");
+                        }
+                        continue;
+                    }
+                }
+                Some(usb::HotplugEvent::Disconnected(dev)) => {
+                    info!("Device disconnected ({}).", dev.path_name());
+                    continue;
+                }
+            }
+        };
+
+        let Ok(conn) = dev_info.open_device() else {
+            warn!("Unexpected: failed to open the device.");
+            continue;
+        };
+        info!("Opened, printing USB configurations:");
+        for conf in conn.configurations() {
+            info!("{:#?}", conf);
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        info!("Closing the device.");
+    }
+}
+```
+
+`res/xml/device_filter.xml`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+
+<resources>
+    <usb-device class="2" />
+</resources>
+```
+
+Note: `class="2"` (Communications Class) can be deleted if you want it to match any device in this test.
+
+Run `cargo apk build -r`. Connect the Android phone to the PC via USB, then configure the adbd TCP port and connect to it. Install the APK package with `adb install`.
+
+Run `adb logcat android_usb_cdc_test:D '*:S'` On PC for tracing, then start the installed Android "App" (`android_usb_cdc_test`). Try to connect and disconnect some USB devices.
+
+### USB connection test (background thread)
+
+```rust
+use android_activity::{AndroidApp, MainEvent, PollEvent};
+use android_usbser::usb;
+use log::{info, warn};
+use std::{sync::Mutex, time::Duration};
+
+#[no_mangle]
+fn android_main(app: AndroidApp) {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("android_usb_cdc_test"),
+    );
+
+    let mut on_destroy = false;
+    loop {
+        app.poll_events(
+            Some(std::time::Duration::from_secs(1)), // timeout
+            |event| match event {
+                PollEvent::Main(MainEvent::Start) => {
+                    info!("Main Start.");
+                    start_background_thread();
+                }
+                PollEvent::Main(MainEvent::Stop) => {
+                    info!("Main Stop.");
+                    stop_background_thread();
+                }
+                PollEvent::Main(MainEvent::Destroy) => {
+                    info!("Main Destroy.");
+                    on_destroy = true;
+                }
+                _ => (),
+            },
+        );
+        if on_destroy {
+            return;
+        }
+    }
+}
+
+static BACKGROUND_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+static FLAG_EXIT: Mutex<bool> = Mutex::new(false);
+
+fn start_background_thread() {
+    let mut th_hdl = BACKGROUND_THREAD.lock().unwrap();
+    if th_hdl.is_none() {
+        th_hdl.replace(std::thread::spawn(background_loop));
+        info!("Background thread started.");
+    }
+}
+
+fn stop_background_thread() {
+    let mut th_hdl = BACKGROUND_THREAD.lock().unwrap();
+    if let Some(th_hdl) = th_hdl.take() {
+        *FLAG_EXIT.lock().unwrap() = true;
+        if th_hdl.join().is_ok() {
+            info!("Background thread stopped normally.");
+        } else {
+            info!("Failed to join the background thread.");
+        };
+        *FLAG_EXIT.lock().unwrap() = false;
+    }
+}
+
+#[inline(always)]
+fn check_flag_exit() -> bool {
+    *FLAG_EXIT.lock().unwrap()
+}
+
+fn background_loop() {
+    let mut watcher = usb::watch_devices().unwrap();
+    let mut startup_dev = usb::check_attached_intent().ok();
+    loop {
+        let dev = if let Some(dev) = startup_dev.take() {
+            info!("Got device from startup intent.");
+            dev
+        } else {
+            match watcher.wait_blocking(Duration::from_millis(500)) {
+                None => continue,
+                Some(usb::HotplugEvent::Connected(dev)) => {
+                    info!("Device connected ({}).", dev.path_name());
+                    dev
+                }
+                Some(usb::HotplugEvent::Disconnected(dev)) => {
+                    info!("Device disconnected ({}).", dev.path_name());
+                    continue;
+                }
+            }
+        };
+        info!("{:#?}", dev);
+        let granted = if let Some(req) = dev.request_permission().unwrap() {
+            info!("Performing permission request...");
+            let result = req.wait_blocking(Duration::from_secs(10));
+            info!("Request result: {:?}", result);
+            result.unwrap_or(dev.has_permission().unwrap())
+        } else {
+            info!("Permission is already granted.");
+            true
+        };
+        if granted {
+            let Ok(conn) = dev.open_device() else {
+                warn!("Unexpected: failed to open the device.");
+                continue;
+            };
+            info!("Opened, printing USB configurations:");
+            for conf in conn.configurations() {
+                info!("{:#?}", conf);
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            info!("Closing the device.");
+            drop(conn);
+        }
+        if check_flag_exit() {
+            return;
+        }
+    }
+}
+```
+
+### Serial test
 
 ```rust
 // This is merely a simplest test program for the library crate.
@@ -66,7 +305,7 @@ resource = "@xml/device_filter"
 
 use android_activity::{AndroidApp, MainEvent, PollEvent};
 use android_usbser::{usb, CdcSerial, SerialConfig};
-use log::info;
+use log::{info, warn};
 use serialport::SerialPort;
 use std::{
     io::{self, BufRead, BufReader, Write},
@@ -78,7 +317,9 @@ use std::{
 #[no_mangle]
 fn android_main(app: AndroidApp) {
     android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Info),
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("android_usb_cdc_test"),
     );
 
     let usb_devs = usb::list_devices().unwrap();
@@ -93,9 +334,6 @@ fn android_main(app: AndroidApp) {
                 PollEvent::Main(MainEvent::Start) => {
                     info!("Main Start.");
                     start_serial_thread();
-                }
-                PollEvent::Main(MainEvent::Resume { loader: _, .. }) => {
-                    info!("Main Resume.");
                 }
                 PollEvent::Main(MainEvent::Stop) => {
                     info!("Main Stop.");
@@ -132,7 +370,7 @@ fn stop_serial_thread() {
         if th_hdl.join().is_ok() {
             info!("Serial thread stopped normally.");
         } else {
-            info!("Failed to join serial thread.");
+            warn!("Failed to join serial thread.");
         };
         *FLAG_EXIT.lock().unwrap() = false;
     }
@@ -157,7 +395,6 @@ fn thread_delay_ms(ms: u64) -> bool {
 }
 
 fn serial_probe_loop() {
-    // should it be checked for once only, before `MainEvent::Destroy`?
     let mut startup_dev = usb::check_attached_intent().ok();
     loop {
         let usb_cdc_dev = if let Some(dev) = startup_dev.take() {
@@ -174,27 +411,27 @@ fn serial_probe_loop() {
             }
             usb_cdc_devs.into_iter().next().unwrap()
         };
+
         info!("Opening {} ...", usb_cdc_dev.path_name());
 
-        usb_cdc_dev.request_permission().unwrap();
-        let mut secs = 0;
-        while !usb_cdc_dev.has_permission().unwrap() && secs < 10 {
-            if !usb_cdc_dev.check_connection() {
-                info!("Disconnection detected.");
-                break;
+        if let Some(perm_req) = usb_cdc_dev.request_permission().unwrap() {
+            for _ in 0..10 {
+                if perm_req.responsed() {
+                    break;
+                }
+                if !thread_delay_ms(1000) {
+                    return;
+                }
+                info!("Waiting...");
             }
-            info!("Waiting...");
-            if !thread_delay_ms(1000) {
-                return;
-            }
-            secs += 1;
         }
         if !usb_cdc_dev.has_permission().unwrap() {
+            info!("Permission not granted.");
             continue;
         }
         info!("Got permission.");
 
-        let mut serial = CdcSerial::build(&usb_cdc_dev, Duration::from_millis(500)).unwrap();
+        let mut serial = CdcSerial::build(&usb_cdc_dev, Duration::from_millis(300)).unwrap();
         let initial_conf = "115200,N,8,1".parse().unwrap();
         info!("Opened, setting {initial_conf} ...");
         serial.set_config(initial_conf).unwrap();
@@ -225,13 +462,10 @@ fn serial_conn_loop(serial: CdcSerial) {
             _ => continue,
         }
 
-        let mut iter_tokens = last_cmd.split(' ');
-        let cmd_name;
-        if let Some(s) = iter_tokens.next() {
-            cmd_name = s;
-        } else {
+        let mut iter_tokens = last_cmd.split_whitespace();
+        let Some(cmd_name) = iter_tokens.next() else {
             continue;
-        }
+        };
 
         let mut is_cmd = true;
         match cmd_name {
@@ -240,17 +474,17 @@ fn serial_conn_loop(serial: CdcSerial) {
                 if let Some(s) = iter_tokens.next() {
                     conf = s.trim();
                 } else {
-                    info!("Error: 'conf' without parameter.");
+                    warn!("Error: 'conf' without parameter.");
                     continue;
                 }
                 if let Ok(conf) = SerialConfig::from_str(conf) {
                     let serial = serial_reader.get_mut();
                     if let Err(s) = config_serialport(serial.as_mut(), &conf) {
-                        info!("{s}");
+                        warn!("{s}");
                         continue;
                     }
                 } else {
-                    info!("Error: failed to parse '{conf}' into serial parameters.");
+                    warn!("Error: failed to parse '{conf}' into serial parameters.");
                     continue;
                 }
             }
@@ -259,12 +493,12 @@ fn serial_conn_loop(serial: CdcSerial) {
                     Some("0") | Some("false") => false,
                     Some("1") | Some("true") => true,
                     _ => {
-                        info!("Error: failed to parse RTS value.");
+                        warn!("Error: failed to parse RTS value.");
                         continue;
                     }
                 };
                 if let Err(e) = serial_reader.get_mut().write_request_to_send(value) {
-                    info!("Error: failed to write RTS value: {e}");
+                    warn!("Error: failed to write RTS value: {e}");
                     continue;
                 }
             }
@@ -276,10 +510,13 @@ fn serial_conn_loop(serial: CdcSerial) {
         let result = if is_cmd {
             serial_reader.get_mut().write_all("Ok\n".as_bytes())
         } else {
-            serial_reader.get_mut().write_all(last_cmd.as_bytes())
+            let last_line_upper = last_cmd.to_uppercase();
+            serial_reader
+                .get_mut()
+                .write_all(last_line_upper.as_bytes())
         };
         if let Err(e) = result {
-            info!("Error: failed to response: {e}");
+            warn!("Error: failed to response: {e}");
         }
     }
 }
@@ -307,22 +544,8 @@ fn config_serialport(serial: &mut dyn SerialPort, conf: &SerialConfig) -> Result
 }
 ```
 
-`res/xml/device_filter.xml`:
-
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-
-<resources>
-    <usb-device class="2" />
-</resources>
-```
-
-Run `cargo apk build -r`.
-
-Connect the Android phone to the PC via USB, then configure the adbd TCP port and connect to it. Install the APK package with `adb install`.
-
-Run `adb logcat android_usb_cdc_test:D '*:S'` On PC for tracing, then start the installed Android "App" (`android_usb_cdc_test`). Connect your USB CDC-ACM serial adapter to the phone, connect GND, Tx and Rx to another serial adapter at the PC side.
+After installing the APK package and running `logcat`, connect your USB CDC-ACM serial adapter to the phone, connect GND, Tx and Rx to another serial adapter at the PC side.
 
 On PC, find the PC side serial adapter's name, open the serial terminal tool and set the right port, set `Baudrate` to 115200, make sure `Parity` is None, `Data Bits` is 8, and `Stop Bits` is 1 (these are initial parameters), then open the port.
 
-Inputs should end with `\n`. Commands like `conf 9600,N,8,1`, `rts 0`, `rts 1` will be executed, others will be sent back for verification.
+Inputs should be valid strings ending with `\n`. Commands like `conf 9600,N,8,1`, `rts 0`, `rts 1` will be executed, others will be sent back (in upper case) for verification.
