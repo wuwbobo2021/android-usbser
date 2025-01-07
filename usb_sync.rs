@@ -74,6 +74,18 @@ impl SyncReader {
     }
 }
 
+impl From<ReadQueue> for SyncReader {
+    fn from(value: ReadQueue) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<SyncReader> for ReadQueue {
+    fn from(value: SyncReader) -> Self {
+        value.queue
+    }
+}
+
 /// Synchronous wrapper of a `nusb` OUT transfer queue.
 pub struct SyncWriter {
     queue: WriteQueue,
@@ -133,5 +145,17 @@ impl SyncWriter {
         };
         self.buf.replace(comp.data.reuse());
         result
+    }
+}
+
+impl From<WriteQueue> for SyncWriter {
+    fn from(value: WriteQueue) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<SyncWriter> for WriteQueue {
+    fn from(value: SyncWriter) -> Self {
+        value.queue
     }
 }

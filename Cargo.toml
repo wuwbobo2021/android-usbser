@@ -1,6 +1,6 @@
 [package]
 name = "android-usbser"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["wuwbobo2021 <wuwbobo@outlook.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -32,7 +32,7 @@ nusb = "0.1.12"
 serialport = "4.6"
 futures-core = "0.3"
 futures-lite = "2.5"
-jni-min-helper = { version = "0.2.2", features = ["futures"] }
+jni-min-helper = { version = "0.2.6", features = ["futures"] }
 
 [lib]
 name = "android_usbser"

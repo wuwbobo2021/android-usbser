@@ -14,7 +14,7 @@ const EXTRA_DEVICE: &str = "device";
 const ACTION_USB_PERMISSION: &str = "rust.android_usbser.USB_PERMISSION"; // custom
 const EXTRA_PERMISSION_GRANTED: &str = "permission";
 
-/// Gets a gloabal reference of `android.hardware.usb.UsbManager`.
+/// Gets a global reference of `android.hardware.usb.UsbManager`.
 #[inline(always)]
 pub(crate) fn usb_manager() -> Result<&'static jni::objects::JObject<'static>, Error> {
     use std::sync::OnceLock;
@@ -50,7 +50,7 @@ fn get_usb_manager() -> Result<jni::objects::GlobalRef, Error> {
     }
 }
 
-/// Checks if the Android application is opened by an intent with
+/// Checks if the Android context is an activity opened by an intent of
 /// `android.hardware.usb.action.USB_DEVICE_ATTACHED`. If so, it takes the `DeviceInfo`
 /// for the caller to open the device.
 ///
@@ -84,7 +84,7 @@ pub fn check_attached_intent() -> Result<DeviceInfo, Error> {
     }
     let dev_info = get_extra_device(&intent_startup)?;
     if dev_info.check_connection() {
-        Ok(dev_info) 
+        Ok(dev_info)
     } else {
         Err(Error::from(ErrorKind::NotConnected))
     }
@@ -124,19 +124,19 @@ pub fn watch_devices() -> Result<HotplugWatch, Error> {
 /// Stream of device connection / disconnection events.
 #[derive(Debug)]
 pub struct HotplugWatch {
-    waiter: BroadcastWaiter
+    waiter: BroadcastWaiter,
 }
 
 /// Event returned from the `HotplugWatch` stream.
 #[derive(Clone, Debug)]
 pub enum HotplugEvent {
     Connected(DeviceInfo),
-    Disconnected(DeviceInfo)
+    Disconnected(DeviceInfo),
 }
 
 #[derive(Debug)]
 struct HotplugWatchFuture<'a> {
-    watch: &'a mut HotplugWatch
+    watch: &'a mut HotplugWatch,
 }
 
 impl HotplugWatch {
@@ -217,7 +217,7 @@ impl DeviceInfo {
         let usb_man = usb_manager()?;
         let env = &mut jni_attach_vm().map_err(jerr)?;
         env.call_method(
-            &usb_man,
+            usb_man,
             "hasPermission",
             "(Landroid/hardware/usb/UsbDevice;)Z",
             &[self.internal.as_obj().into()],
@@ -235,10 +235,10 @@ impl DeviceInfo {
     }
 
     /// Performs a permission request for the device.
-    /// 
+    ///
     /// Returns `Ok(None)` if the permission is already granted. Otherwise it returns a
     /// `PermissionRequest` handler.
-    /// 
+    ///
     /// The activity might be paused by `requestPermission()` here, but resumed on receving result.
     /// The state of `PermissionRequest` can be checked on `android_activity::MainEvent::Resume`,
     /// Otherwise block in a background thread (it wouldn't be paused/resumed automatically).
@@ -279,7 +279,7 @@ impl DeviceInfo {
             .map_err(jerr)?;
 
         env.call_method(
-            &usb_man,
+            usb_man,
             "requestPermission",
             "(Landroid/hardware/usb/UsbDevice;Landroid/app/PendingIntent;)V",
             &[(&self.internal).into(), (&pending).into()],
@@ -291,7 +291,12 @@ impl DeviceInfo {
             return Ok(None); // almost impossible
         }
         BroadcastWaiter::build([ACTION_USB_PERMISSION])
-            .map(|waiter| Some(PermissionRequest { dev_info: self.clone(), waiter }))
+            .map(|waiter| {
+                Some(PermissionRequest {
+                    dev_info: self.clone(),
+                    waiter,
+                })
+            })
             .map_err(jerr)
     }
 
@@ -305,7 +310,7 @@ impl DeviceInfo {
             let env = &mut jni_attach_vm().map_err(jerr)?;
             let conn = env
                 .call_method(
-                    &usb_man,
+                    usb_man,
                     "openDevice",
                     "(Landroid/hardware/usb/UsbDevice;)Landroid/hardware/usb/UsbDeviceConnection;",
                     &[(&self.internal).into()],
@@ -331,7 +336,7 @@ impl DeviceInfo {
 #[derive(Debug)]
 pub struct PermissionRequest {
     dev_info: DeviceInfo,
-    waiter: BroadcastWaiter
+    waiter: BroadcastWaiter,
 }
 
 impl PermissionRequest {
@@ -339,7 +344,7 @@ impl PermissionRequest {
     pub fn device_info(&self) -> &DeviceInfo {
         &self.dev_info
     }
-    
+
     /// Checks if the request has completed.
     pub fn responsed(&self) -> bool {
         self.waiter.count_received() > 0

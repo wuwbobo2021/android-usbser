@@ -54,9 +54,27 @@ pub mod usb {
     }
 }
 
+use nusb::transfer::{Queue, RequestBuffer};
+
+/// Serial driver implementations inside this crate should implement this trait.
+///
+/// TODO: add crate-level functions `probe() -> Result<Vec<DeviceInfo>, Error>`
+/// and `open(dev_info: &DeviceInfo, timeout: Duration) -> Result<Box<dyn UsbSerial>, Error>`.
+pub trait UsbSerial: serialport::SerialPort {
+    /// Sets baudrate, parity check mode, data bits and stop bits.
+    fn configure(&mut self, conf: &SerialConfig) -> std::io::Result<()>;
+
+    /// Takes `nusb` transfer queues of the read endpoint and the write endpoint.
+    /// This can be called after serial configuration to do asynchronous operations.
+    fn into_queues(self) -> (Queue<RequestBuffer>, Queue<Vec<u8>>);
+
+    #[doc(hidden)]
+    fn sealer(_: private::Internal);
+}
+
 use serialport::{DataBits, Parity, StopBits};
 
-/// Sets baudrate, parity check mode, data bits and stop bits.
+/// Serial parameters including baudrate, parity check mode, data bits and stop bits.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SerialConfig {
     pub baud_rate: u32,
@@ -155,4 +173,10 @@ impl std::fmt::Display for SerialConfig {
         };
         write!(f, "{baud_rate},{parity},{data_bits},{stop_bits}")
     }
+}
+
+mod private {
+    /// Used as a parameter of the hidden function in sealed traits.
+    #[derive(Debug)]
+    pub struct Internal;
 }

@@ -3,9 +3,12 @@ use std::{
     time::Duration,
 };
 
-use crate::usb::{self, DeviceInfo, InterfaceInfo, SyncReader, SyncWriter};
 use crate::SerialConfig;
-use nusb::transfer::{Control, ControlType, Direction, Recipient};
+use crate::{
+    usb::{self, DeviceInfo, InterfaceInfo, SyncReader, SyncWriter},
+    UsbSerial,
+};
+use nusb::transfer::{Control, ControlType, Direction, Queue, Recipient, RequestBuffer};
 
 use serialport::{DataBits, Parity, SerialPort, StopBits};
 
@@ -353,4 +356,16 @@ impl SerialPort for CdcSerial {
     fn try_clone(&self) -> serialport::Result<Box<dyn serialport::SerialPort>> {
         Err(err_unsupported_op())
     }
+}
+
+impl UsbSerial for CdcSerial {
+    fn configure(&mut self, conf: &SerialConfig) -> std::io::Result<()> {
+        self.set_config(*conf)
+    }
+
+    fn into_queues(self) -> (Queue<RequestBuffer>, Queue<Vec<u8>>) {
+        (self.reader.into(), self.writer.into())
+    }
+
+    fn sealer(_: crate::private::Internal) {}
 }

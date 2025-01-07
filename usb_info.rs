@@ -9,7 +9,7 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>, Error> {
     let env = &mut jni_attach_vm().map_err(jerr)?;
     let mut devices = Vec::new();
     let ref_dev_list = env
-        .call_method(&usb_man, "getDeviceList", "()Ljava/util/HashMap;", &[])
+        .call_method(usb_man, "getDeviceList", "()Ljava/util/HashMap;", &[])
         .get_object(env)
         .map_err(jerr)?;
     let map_dev = env.get_map(&ref_dev_list).map_err(jerr)?;
@@ -56,7 +56,9 @@ pub struct DeviceInfo {
     /// USB protocol version.
     #[getset(get = "pub")]
     version: Option<String>,
-    /// Device serial ID string.
+    /// Device serial ID string. FIXME: On Android 10 and above, this is always `None`
+    /// if this struct is created before gaining permission for the device. To read it,
+    /// call `list_devices()` and find the device again after the permission is granted.
     #[getset(get = "pub")]
     serial_number: Option<String>,
 
@@ -112,7 +114,16 @@ impl DeviceInfo {
             info.version = Some(get_string_field(env, dev, "getVersion")?);
             info.manufacturer_string = get_string_field(env, dev, "getManufacturerName").ok();
             info.product_string = get_string_field(env, dev, "getProductName").ok();
-            info.serial_number = get_string_field(env, dev, "getSerialNumber").ok();
+            info.serial_number = if android_api_level() < 29 {
+                get_string_field(env, dev, "getSerialNumber").ok()
+            } else {
+                // Avoid printing `java.lang.SecurityException: User has not given permission...`
+                env.call_method(dev, "getSerialNumber", "()Ljava/lang/String;", &[])
+                    .map_err(jni_clear_ex_silent)
+                    .get_object(env)
+                    .and_then(|o| o.get_string(env))
+                    .ok()
+            }
         }
         Ok(info)
     }
@@ -150,10 +161,16 @@ impl PartialEq for DeviceInfo {
     fn eq(&self, other: &Self) -> bool {
         // Check `android.hardware.usb.UsbDevice.equals()` source code:
         // it may compare both `UsbDevice` only by name (`path_name`).
+        if let (Some(self_ser), Some(other_ser)) =
+            (self.serial_number.as_ref(), other.serial_number.as_ref())
+        {
+            if self_ser != other_ser {
+                return false;
+            }
+        }
         self.vendor_id == other.vendor_id
             && self.product_id == other.product_id
             && self.path_name == other.path_name
-            && self.serial_number == other.serial_number
     }
 }
 
